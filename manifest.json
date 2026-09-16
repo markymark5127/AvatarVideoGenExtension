@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gemini Video Prompt Queue",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Queue Gemini Avatar video prompts, detect completed generations, and auto-download each scene with reusable background/reference images, scene-based downloads, and busy-response backoff/retry.",
   "permissions": [
     "downloads",
@@ -18,7 +18,8 @@
       ],
       "js": [
         "completion-guard.js",
-        "content.js"
+        "content.js",
+        "cooldown-default.js"
       ],
       "css": [
         "styles.css"
