@@ -1,9 +1,21 @@
 (() => {
   const GUARD_ID = 'gvpq-completion-guard';
   const ROOT_ID = 'gvpq-root';
+
+  // Strong result elements are still useful when Gemini exposes them, but Avatar
+  // video generation often uses custom UI that does not expose a normal <video>
+  // or Download control until after the generation has already completed.
   const MIN_RESULT_AGE_MS = 12_000;
-  const RESULT_STABLE_MS = 3_500;
+  const RESULT_STABLE_MS = 2_500;
+
+  // Google documents that the same Gemini chat cannot be interacted with while a
+  // video is generating. This makes the composer lock -> unlock cycle a much more
+  // durable completion signal than relying on Gemini's result-card DOM.
+  const MIN_CYCLE_AGE_MS = 12_000;
+  const COMPOSER_READY_STABLE_MS = 3_500;
+  const NATIVE_END_STABLE_MS = 8_000;
   const NO_NATIVE_FALLBACK_MS = 25_000;
+
   const POLL_MS = 750;
   const MUTATION_DEBOUNCE_MS = 150;
 
@@ -31,6 +43,36 @@
     const title = el.getAttribute?.('title') || '';
     const text = (el.innerText || el.textContent || '').trim();
     return `${aria} ${title} ${text}`.replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function findPromptEditor() {
+    const selectors = [
+      'rich-textarea [contenteditable="true"]',
+      '[contenteditable="true"][role="textbox"]',
+      'textarea[aria-label*="prompt" i]',
+      'textarea[placeholder*="ask" i]',
+      'textarea'
+    ];
+
+    for (const selector of selectors) {
+      const candidates = qsAll(selector).filter(el => visible(el) && !isExtensionNode(el));
+      if (candidates.length) return candidates[candidates.length - 1];
+    }
+    return null;
+  }
+
+  function composerIsInteractive() {
+    const editor = findPromptEditor();
+    if (!editor) return false;
+
+    if (editor.disabled || editor.readOnly) return false;
+    if (editor.getAttribute?.('aria-disabled') === 'true') return false;
+    if (editor.getAttribute?.('contenteditable') === 'false') return false;
+
+    const blockedAncestor = editor.closest?.('[aria-disabled="true"], [inert], [aria-busy="true"]');
+    if (blockedAncestor && !isExtensionNode(blockedAncestor)) return false;
+
+    return true;
   }
 
   function resultSignature(el) {
@@ -103,7 +145,9 @@
     return candidates.find(el => {
       if (el.getAttribute?.('aria-busy') === 'true') return true;
       const label = labelFor(el).slice(0, 500);
-      return /\b(stop response|stop generating|stop generation|cancel generation|generating video|creating your video|creating video|rendering video|preparing video)\b/.test(label);
+      return /\b(stop response|stop generating|stop generation|cancel generation)\b/.test(label) ||
+        /\b(generating|creating|rendering|preparing|processing|making)\b[^\n]{0,80}\bvideo\b/.test(label) ||
+        /\bvideo\b[^\n]{0,80}\b(generating|creating|rendering|preparing|processing)\b/.test(label);
     }) || null;
   }
 
@@ -174,6 +218,11 @@
       startedAt: now(),
       baseline,
       sawNativeGenerating: false,
+      firstNativeGeneratingAt: 0,
+      lastNativeGeneratingAt: 0,
+      nativeAbsentSince: 0,
+      sawComposerLocked: false,
+      composerReadySince: 0,
       evidenceSignature: '',
       evidenceStableSince: 0
     };
@@ -197,31 +246,86 @@
       return;
     }
 
-    const elapsed = now() - session.startedAt;
+    const stamp = now();
+    const elapsed = stamp - session.startedAt;
     const nativeGenerating = nativeGenerationIndicator();
-    if (nativeGenerating) session.sawNativeGenerating = true;
+    const composerInteractive = composerIsInteractive();
 
+    if (nativeGenerating) {
+      if (!session.sawNativeGenerating) session.firstNativeGeneratingAt = stamp;
+      session.sawNativeGenerating = true;
+      session.lastNativeGeneratingAt = stamp;
+      session.nativeAbsentSince = 0;
+    } else if (session.sawNativeGenerating && !session.nativeAbsentSince) {
+      session.nativeAbsentSince = stamp;
+    }
+
+    if (!composerInteractive) {
+      session.sawComposerLocked = true;
+      session.composerReadySince = 0;
+    } else if (session.sawComposerLocked && !nativeGenerating) {
+      if (!session.composerReadySince) session.composerReadySince = stamp;
+    } else {
+      session.composerReadySince = 0;
+    }
+
+    // Preferred path: Gemini locked the composer during generation and then made
+    // the same chat interactive again. This does not depend on the result card DOM.
+    const composerCycleComplete =
+      session.sawComposerLocked &&
+      composerInteractive &&
+      !nativeGenerating &&
+      elapsed >= MIN_CYCLE_AGE_MS &&
+      session.composerReadySince > 0 &&
+      stamp - session.composerReadySince >= COMPOSER_READY_STABLE_MS;
+
+    if (composerCycleComplete) {
+      console.debug('[GVQ Guard] Composer unlocked after generation. Releasing queue.');
+      clearSession('composer-unlocked');
+      return;
+    }
+
+    // Secondary path: Gemini exposed a generation indicator, it disappeared, and
+    // stayed gone long enough to rule out a brief component swap/flicker.
+    const nativeCycleComplete =
+      session.sawNativeGenerating &&
+      !nativeGenerating &&
+      elapsed >= MIN_CYCLE_AGE_MS &&
+      session.nativeAbsentSince > 0 &&
+      stamp - session.nativeAbsentSince >= NATIVE_END_STABLE_MS;
+
+    if (nativeCycleComplete) {
+      console.debug('[GVQ Guard] Native generation indicator ended stably. Releasing queue.');
+      clearSession('generation-ended');
+      return;
+    }
+
+    // Strong-result path remains as another independent confirmation route.
     const evidence = findNewResultEvidence();
-    const hasStartConfidence = session.sawNativeGenerating || elapsed >= NO_NATIVE_FALLBACK_MS;
+    const hasStartConfidence = session.sawNativeGenerating || session.sawComposerLocked || elapsed >= NO_NATIVE_FALLBACK_MS;
     const safeToConfirm = !nativeGenerating && elapsed >= MIN_RESULT_AGE_MS && hasStartConfidence;
 
     if (evidence && safeToConfirm) {
       const key = `${evidence.reason}|${evidence.signature}`;
       if (session.evidenceSignature !== key) {
         session.evidenceSignature = key;
-        session.evidenceStableSince = now();
+        session.evidenceStableSince = stamp;
         setRootDiagnostic('candidate');
         console.debug('[GVQ Guard] Completion candidate:', evidence.reason, evidence.el);
-      } else if (now() - session.evidenceStableSince >= RESULT_STABLE_MS) {
+      } else if (stamp - session.evidenceStableSince >= RESULT_STABLE_MS) {
         console.debug('[GVQ Guard] Confirmed completed video result. Releasing queue.');
-        clearSession('confirmed');
+        clearSession('result-confirmed');
         return;
       }
     } else {
       session.evidenceSignature = '';
       session.evidenceStableSince = 0;
-      setRootDiagnostic(nativeGenerating ? 'generating' : 'waiting-result');
     }
+
+    if (nativeGenerating) setRootDiagnostic('generating');
+    else if (!composerInteractive) setRootDiagnostic('composer-locked');
+    else if (session.sawComposerLocked) setRootDiagnostic('composer-ready');
+    else setRootDiagnostic('waiting-result');
   }
 
   function scheduleMutationPoll() {
@@ -262,7 +366,7 @@
       subtree: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ['aria-label', 'title', 'src', 'poster', 'href', 'aria-busy']
+      attributeFilter: ['aria-label', 'title', 'src', 'poster', 'href', 'aria-busy', 'aria-disabled', 'disabled', 'readonly', 'contenteditable', 'inert']
     });
     pollTimer = setInterval(poll, POLL_MS);
   };
