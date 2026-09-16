@@ -1,0 +1,70 @@
+#gvpq-root {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483647;
+  width: 340px;
+  font: 13px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #1f1f1f;
+  background: rgba(255,255,255,.98);
+  border: 1px solid rgba(0,0,0,.12);
+  border-radius: 14px;
+  box-shadow: 0 12px 38px rgba(0,0,0,.22);
+  overflow: hidden;
+}
+#gvpq-root * { box-sizing: border-box; }
+.gvpq-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(0,0,0,.08);
+}
+#gvpq-body { padding: 11px; }
+.gvpq-row, .gvpq-controls, .gvpq-two { display: flex; gap: 7px; }
+.gvpq-file-row { margin-bottom: 7px; }
+.gvpq-controls { flex-wrap: wrap; margin: 10px 0; }
+.gvpq-controls button { flex: 1 1 42%; }
+#gvpq-root button, .gvpq-file-btn {
+  border: 1px solid rgba(0,0,0,.14);
+  background: #f7f7f7;
+  color: #1f1f1f;
+  border-radius: 8px;
+  padding: 7px 9px;
+  cursor: pointer;
+  text-align: center;
+}
+#gvpq-root button:hover, .gvpq-file-btn:hover { background: #efefef; }
+#gvpq-root .gvpq-primary { background: #1f1f1f; color: white; border-color: #1f1f1f; }
+#gvpq-root .gvpq-danger { margin-top: 9px; width: 100%; }
+.gvpq-file-btn input { display: none; }
+.gvpq-muted { color: #6b6b6b; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gvpq-progress { margin-top: 8px; font-weight: 650; }
+.gvpq-status { margin-top: 4px; padding: 7px 8px; border-radius: 8px; background: #f4f4f4; min-height: 32px; }
+.gvpq-status[data-kind="ok"] { background: #eef8f0; }
+.gvpq-status[data-kind="error"] { background: #fff0f0; }
+#gvpq-root details { border-top: 1px solid rgba(0,0,0,.08); padding-top: 8px; }
+#gvpq-root summary { cursor: pointer; margin-bottom: 8px; }
+#gvpq-root label { display: block; margin: 7px 0; }
+#gvpq-root input[type="text"], #gvpq-root input[type="number"] {
+  width: 100%;
+  margin-top: 4px;
+  border: 1px solid rgba(0,0,0,.18);
+  border-radius: 7px;
+  padding: 7px;
+  background: white;
+  color: #1f1f1f;
+}
+.gvpq-two > label { flex: 1; }
+.gvpq-check { display: flex !important; align-items: flex-start; gap: 7px; }
+@media (prefers-color-scheme: dark) {
+  #gvpq-root { color: #ededed; background: rgba(32,32,32,.98); border-color: rgba(255,255,255,.14); }
+  #gvpq-root button, .gvpq-file-btn { background: #333; color: #ededed; border-color: rgba(255,255,255,.16); }
+  #gvpq-root button:hover, .gvpq-file-btn:hover { background: #3b3b3b; }
+  #gvpq-root .gvpq-primary { background: #ededed; color: #1f1f1f; }
+  .gvpq-muted { color: #aaa; }
+  .gvpq-status { background: #2a2a2a; }
+  .gvpq-status[data-kind="ok"] { background: #18351f; }
+  .gvpq-status[data-kind="error"] { background: #421f1f; }
+  #gvpq-root input[type="text"], #gvpq-root input[type="number"] { background: #252525; color: #ededed; border-color: rgba(255,255,255,.18); }
+}
