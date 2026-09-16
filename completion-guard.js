@@ -3,10 +3,13 @@
   const ROOT_ID = 'gvpq-root';
   const MIN_RESULT_AGE_MS = 12_000;
   const RESULT_STABLE_MS = 3_500;
+  const NO_NATIVE_FALLBACK_MS = 25_000;
   const POLL_MS = 750;
+  const MUTATION_DEBOUNCE_MS = 150;
 
   let session = null;
   let pollTimer = null;
+  let mutationPollTimer = null;
 
   const now = () => Date.now();
   const qsAll = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -199,7 +202,8 @@
     if (nativeGenerating) session.sawNativeGenerating = true;
 
     const evidence = findNewResultEvidence();
-    const safeToConfirm = !nativeGenerating && elapsed >= MIN_RESULT_AGE_MS;
+    const hasStartConfidence = session.sawNativeGenerating || elapsed >= NO_NATIVE_FALLBACK_MS;
+    const safeToConfirm = !nativeGenerating && elapsed >= MIN_RESULT_AGE_MS && hasStartConfidence;
 
     if (evidence && safeToConfirm) {
       const key = `${evidence.reason}|${evidence.signature}`;
@@ -220,6 +224,14 @@
     }
   }
 
+  function scheduleMutationPoll() {
+    if (!session || mutationPollTimer) return;
+    mutationPollTimer = setTimeout(() => {
+      mutationPollTimer = null;
+      poll();
+    }, MUTATION_DEBOUNCE_MS);
+  }
+
   document.addEventListener('click', event => {
     const target = event.target?.closest?.('button, [role="button"], a');
     if (!target) return;
@@ -238,9 +250,7 @@
     }
   }, true);
 
-  const observer = new MutationObserver(() => {
-    if (session) poll();
-  });
+  const observer = new MutationObserver(scheduleMutationPoll);
 
   const startObserver = () => {
     if (!document.body) {
