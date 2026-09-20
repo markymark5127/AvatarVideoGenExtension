@@ -193,6 +193,17 @@
     }) || null;
   }
 
+  function composerReadyForNextPrompt() {
+    const editor = findPromptEditor();
+    if (!editor || !visible(editor)) return false;
+    if (editor.disabled || editor.readOnly) return false;
+    if (editor.getAttribute?.('aria-disabled') === 'true') return false;
+    if (editor.getAttribute?.('contenteditable') === 'false') return false;
+
+    const blockedAncestor = editor.closest?.('[aria-disabled="true"], [aria-busy="true"], [inert]');
+    return !blockedAncestor;
+  }
+
   function countCompletionHints() {
     const candidates = qsAll('video, canvas, iframe, button, a, [role="button"], [aria-label], [title]').filter(el => visible(el) && !isInsideExtension(el));
     let media = 0;
@@ -732,84 +743,99 @@
     const minWait = Math.max(5, Number(state.settings.minWaitSeconds) || 20) * 1000;
     const maxWait = Math.max(1, Number(state.settings.maxWaitMinutes) || 8) * 60 * 1000;
     const baselineHints = countCompletionHints();
-    let sawGenerating = false;
-    let lastDomChange = now();
-    let meaningfulMutation = false;
-    let resultLikeMutation = false;
 
-    const observer = new MutationObserver(mutations => {
-      for (const mutation of mutations) {
-        const target = mutation.target?.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target?.parentElement;
-        if (target && isInsideExtension(target)) continue;
-        lastDomChange = now();
-        if (now() - started > 2500) meaningfulMutation = true;
+    // Keep this deliberately simple. Gemini's composer is the primary completion
+    // signal: while Avatar video generation owns the chat, the prompt box/Stop
+    // control is blocked. Once that blocked state has been observed and the
+    // composer is usable again for a few seconds, the next scene can be sent.
+    let sawComposerBlockedOrStop = false;
+    let composerReadySince = 0;
+    let resultReadySince = 0;
 
-        for (const node of mutation.addedNodes || []) {
-          const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
-          if (!el || isInsideExtension(el)) continue;
-          const label = `${el.getAttribute?.('aria-label') || ''} ${el.getAttribute?.('title') || ''} ${el.innerText || ''}`.toLowerCase().slice(0, 1200);
-          // Don't treat the user's own prompt (which often contains the word "video") as completion.
-          if (/download|play video|open video|view video|save video|share video|generated video|video is ready|video ready/.test(label)) {
-            resultLikeMutation = true;
-          }
-          if (el.matches?.('video, canvas, iframe') || el.querySelector?.('video, canvas, iframe')) {
-            resultLikeMutation = true;
-          }
-        }
-      }
-    });
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-label', 'title', 'src', 'href'] });
+    while (state.running && !state.paused) {
+      await sleep(750);
 
-    try {
-      while (state.running && !state.paused) {
-        await sleep(1000);
-
-        if (state.forceFinishRequested) {
-          state.forceFinishRequested = false;
-          return countVideoSignals();
-        }
-
-        const currentBusyCount = countBusyResponsesOnPage();
-        if (currentBusyCount > busyBaselineCount) {
-          throw makeBusyRetryError('Gemini says the maximum number of video requests are already running right now.');
-        }
-
-        const error = pageHasErrorSinceSubmit();
-        if (error) throw new Error(`Gemini page shows: “${error}”`);
-
-        const generating = findGenerationIndicator() || findStopButton();
-        if (generating) sawGenerating = true;
-
-        const signals = countVideoSignals();
-        const hints = countCompletionHints();
-        const hasNewVideo = signals.videos > baseline.videos;
-        const hasNewDownload = signals.downloads > baseline.downloads;
-        const hasNewHint = hints.media > baselineHints.media || hints.actions > baselineHints.actions;
-        const elapsed = now() - started;
-        const domStableFor = now() - lastDomChange;
-        const generationEnded = sawGenerating && !generating && domStableFor >= 4500;
-        const resultSettled = !generating && (hasNewVideo || hasNewDownload || hasNewHint || resultLikeMutation) && domStableFor >= 5500;
-
-        if (elapsed >= minWait) {
-          if (generationEnded || resultSettled) return signals;
-
-          // Last-resort beta-UI fallback: Gemini changed the page after submission and then
-          // remained completely settled for a while after a reasonable generation window.
-          // This avoids waiting forever on custom Avatar components that expose no <video> tag.
-          if (!state.settings.requireVideoSignal && meaningfulMutation && !generating && elapsed >= Math.max(minWait, 35000) && domStableFor >= 9000) {
-            return signals;
-          }
-        }
-
-        if (elapsed > maxWait) {
-          throw new Error('Timed out waiting for Gemini to finish this scene. If the video is visibly complete, use “Mark finished + continue”.');
-        }
+      if (state.forceFinishRequested) {
+        state.forceFinishRequested = false;
+        return countVideoSignals();
       }
 
-      throw new Error('Queue paused.');
-    } finally {
-      observer.disconnect();
+      const currentBusyCount = countBusyResponsesOnPage();
+      if (currentBusyCount > busyBaselineCount) {
+        throw makeBusyRetryError('Gemini says the maximum number of video requests are already running right now.');
+      }
+
+      const error = pageHasErrorSinceSubmit();
+      if (error) throw new Error(`Gemini page shows: “${error}”`);
+
+      const stopButtonVisible = Boolean(findStopButton());
+      const composerReady = composerReadyForNextPrompt();
+
+      if (stopButtonVisible || !composerReady) {
+        sawComposerBlockedOrStop = true;
+        composerReadySince = 0;
+      } else if (sawComposerBlockedOrStop && !composerReadySince) {
+        composerReadySince = now();
+      }
+
+      const signals = countVideoSignals();
+      const hints = countCompletionHints();
+      const hasNewResult =
+        signals.videos > baseline.videos ||
+        signals.downloads > baseline.downloads ||
+        hints.media > baselineHints.media ||
+        hints.actions > baselineHints.actions;
+
+      if (hasNewResult && composerReady && !stopButtonVisible) {
+        if (!resultReadySince) resultReadySince = now();
+      } else {
+        resultReadySince = 0;
+      }
+
+      const elapsed = now() - started;
+      if (elapsed >= minWait) {
+        // Primary path: generation made Gemini unavailable, then Gemini became
+        // ready for another prompt. No video-card DOM inspection is required.
+        if (
+          sawComposerBlockedOrStop &&
+          composerReady &&
+          !stopButtonVisible &&
+          composerReadySince &&
+          now() - composerReadySince >= 2500
+        ) {
+          return signals;
+        }
+
+        // Fallback: some Gemini builds never expose the blocked composer state.
+        // A new result plus an interactive composer is enough after it is stable.
+        if (
+          hasNewResult &&
+          composerReady &&
+          !stopButtonVisible &&
+          resultReadySince &&
+          now() - resultReadySince >= 2500
+        ) {
+          return signals;
+        }
+
+        // Optional permissive fallback for users who explicitly disable the
+        // "Wait for a new video/download signal" setting.
+        if (
+          !state.settings.requireVideoSignal &&
+          composerReady &&
+          !stopButtonVisible &&
+          elapsed >= Math.max(minWait, 35000)
+        ) {
+          return signals;
+        }
+      }
+
+      if (elapsed > maxWait) {
+        throw new Error('Timed out waiting for Gemini to become ready for the next scene. If the video is visibly complete, use “Mark finished + continue”.');
+      }
     }
+
+    throw new Error('Queue paused.');
   }
 
   async function submitCurrentScene() {
