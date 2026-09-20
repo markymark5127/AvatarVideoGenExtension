@@ -1,4 +1,4 @@
-# Gemini Video Prompt Queue v0.5.2.0
+# Gemini Video Prompt Queue v0.8.3
 
 A Chrome extension that queues scene prompts into one Gemini conversation, selects the Avatar tool before every scene, waits for generation to finish, and can automatically download each completed scene.
 
@@ -97,3 +97,12 @@ Background/reference images are now attached using paste only. The extension wil
 - Auto-download failures are now non-fatal. The queue advances to the next scene even if Download cannot be found, started, confirmed, or renamed.
 - Failed download attempts clear their pending rename token so they cannot affect a later unrelated download.
 - The extension shows a warning status when a scene finished successfully but its auto-download failed.
+
+
+## New in v0.8.3
+
+- Simplifies completion detection around Gemini's prompt composer instead of requiring the generated video card DOM to settle.
+- After the queue observes Gemini become blocked/occupied by generation, it advances once the composer is usable again for 2.5 seconds.
+- A newly visible video/download/result remains a fallback completion signal when Gemini does not expose the blocked-composer transition.
+- Removes the separate completion-guard content script from the extension runtime so only one completion system decides when to advance.
+- Keeps **Mark finished + continue** as a manual escape hatch, but it should be needed much less often.
